@@ -1,7 +1,7 @@
 from __future__ import division
+from scipy import stats
 import random
 import numpy as np
-from scipy import stats
 import cv
 import cv2
 import copy as cp
@@ -41,8 +41,8 @@ def calculateDistribution(window,rectangle,kmat,f,yuv,n):
                 tmp=(tmp+1)/2
             #if (np.ceil(rectangle[i][j][0]*8)==n):
             if (np.ceil(rectangle[i][j][0]/32)==4):
-                #pY = pY + kmat[i][j] * (np.ceil(tmp*8) - n + 1)*f
-                pY = pY + kmat[i][j] * (np.ceil(tmp/32) - 4 + 1)*f
+                pY = pY + kmat[i][j] * (np.ceil(tmp*8) - n + 1)*f
+                #pY = pY + kmat[i][j] * (np.ceil(tmp/32) - 4 + 1)*f
     return pY
 
 def initStateVectors(imageSize,sampleSize):
