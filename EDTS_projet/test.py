@@ -1,10 +1,8 @@
 from __future__ import division
 import random
-import numpy as np
-from scipy import stats
 import cv
 import cv2
-import copy as cp
+import numpy as np
 
 
 class SystemModel:
@@ -39,10 +37,8 @@ def calculateDistribution(window,rectangle,kmat,f,yuv,n):
             tmp = rectangle[i][j][yuv]
             if (yuv>0):
                 tmp=(tmp+1)/2
-            #if (np.ceil(rectangle[i][j][0]*8)==n):
-            if (np.ceil(rectangle[i][j][0]/32)==4):
-                #pY = pY + kmat[i][j] * (np.ceil(tmp*8) - n + 1)*f
-                pY = pY + kmat[i][j] * (np.ceil(tmp/32) - 4 + 1)*f
+            if (np.ceil(rectangle[i][j][0]/32)==n):
+                pY = pY + kmat[i][j] * (np.ceil(tmp/32) - n + 1)*f
     return pY
 
 def initStateVectors(imageSize,sampleSize):
@@ -54,6 +50,13 @@ def initStateVectors(imageSize,sampleSize):
     hy = [1 for i in range(sampleSize)]
     a = [1 for i in range(sampleSize)]
     return([list(s) for s in zip(xs,ys,vxs,vys,hx,hy,a)])
+
+def distancesPts(mat1,mat2):
+    distances = np.zeros((mat1.shape[0],mat1.shape[1]))
+    for i in range(mat1.shape[0]):
+        for j in range(mat1.shape[1]):
+            distances[i][j] = np.sqrt(np.power((mat1[i][j][0]-mat2[i][j][0]),2)+np.power((mat1[i][j][1]-mat2[i][j][1]),2))
+    return distances
 
 def main():
 
@@ -75,18 +78,15 @@ def main():
     for sv in svs:
         cv2.circle(dst,(int(sv[0]),int(sv[1])),3,cv.CV_RGB(100,0,255))
 
-    # while (capture.isOpened()):
-    #     ret, image = capture.read()
-    #     hsv = cv2.cvtColor(frame,cv2.COLOR_BGR2YUV);
-
     rectanglepts = getPixelPosition(rectangle,window)
 
 
-    c = [(window[2]-window[0])/2,(window[3]-window[1])/2] # y, x
+    c = [(window[2]+window[0])/2,(window[3]+window[1])/2] # y, x
     cmat = np.ones((rectanglepts.shape[0],rectanglepts.shape[1],1))*c
-    rmat = np.divide((rectanglepts - cmat),b)
+    rmat = np.divide(distancesPts(rectanglepts,cmat),b)
     kmat = np.ones((rectangle.shape[0],rectangle.shape[1])) - rmat**2
-    f = np.sum(1./kmat)
+    #f = np.sum(1./kmat)  erreur sur l'article
+    f = 1/(np.sum(kmat))
     distribution = np.zeros((3,8))
     for i in range(3):
         for j in range(8):
