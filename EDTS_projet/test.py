@@ -1,5 +1,7 @@
 from __future__ import division
+from scipy import stats
 import random
+import numpy as np
 import cv
 import cv2
 import numpy as np
