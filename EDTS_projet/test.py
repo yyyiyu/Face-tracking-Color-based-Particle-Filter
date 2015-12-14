@@ -23,6 +23,53 @@ def model_s(sv,w):
                    [0,0,0,0,0,0,1]])
     return(np.array(np.dot(F,sv))[0]+w)
 
+
+def getWindow(pt,windowsize,frame):
+    pt = np.asarray(pt)
+    xmax = frame.shape[1]
+    ymax = frame.shape[0]
+    hx = windowsize[1]/2
+    hy = windowsize[0]/2
+    y = pt[1].round()
+    x = pt[0].round()
+    if ((y-hy>0) & (x-hx>0) & (y+hy<ymax) & (x+hx<xmax)):
+        window = [y-hy,x-hx,y+hy,x+hx]
+    else :
+        window = -1
+    return window
+
+def getRectangle(frame,window):
+    yuv = cv2.cvtColor(frame,cv2.COLOR_BGR2YUV);
+    rectangle = yuv[window[0]:window[2],window[1]:window[3]]
+    return rectangle
+
+def calculateDistribution(window,rectangle,yuv,n,kmat,f,b):
+    #rectanglepts = getPixelPosition(rectangle,window)
+    pY = 0
+    # cy = (window[2]+window[0])/2
+    # cx = (window[3]+window[1])/2
+    # f = 0
+
+    for i in range(rectangle.shape[0]):
+        for j in range(rectangle.shape[1]):
+            tmp = rectangle[i][j][yuv]
+            # r = np.sqrt(np.power((i+window[0]-cy),2)+np.power((j+window[1]-cx),2))/b
+            # k = 1 - np.power(r,2)
+            # f = f + k
+            if (np.ceil(tmp/32)==n):
+                pY = pY + kmat[i][j] * (np.ceil(tmp/32) - n + 1)*f
+                # pY = pY + k*(np.ceil(tmp/32) - n + 1)
+    # pY = pY/f
+    return pY
+
+def getDistributionMatrice(window,rectangle,kmat,f,b):
+    distribution = np.zeros((3,8))
+    for i in range(3):
+        for j in range(8):
+            distribution[i][j]=calculateDistribution(window,rectangle,i,j+1,kmat,f,b)
+    return distribution
+
+
 def getPixelPosition(rectangle,windows):
     rectanglepts = np.ones((rectangle.shape[0],rectangle.shape[1],1))*(1,1)
     for i in range(0,rectangle.shape[0],1):
@@ -31,17 +78,13 @@ def getPixelPosition(rectangle,windows):
     return rectanglepts
 
 
-def calculateDistribution(window,rectangle,kmat,f,yuv,n):
+def getKmat(rectangle,window,b):
     rectanglepts = getPixelPosition(rectangle,window)
-    pY = 0
-    for i in range(rectanglepts.shape[0]):
-        for j in range(rectanglepts.shape[1]):
-            tmp = rectangle[i][j][yuv]
-            if (yuv>0):
-                tmp=(tmp+1)/2
-            if (np.ceil(rectangle[i][j][0]/32)==n):
-                pY = pY + kmat[i][j] * (np.ceil(tmp/32) - n + 1)*f
-    return pY
+    c = [(window[2]+window[0])/2,(window[3]+window[1])/2] # y, x
+    cmat = np.ones((rectanglepts.shape[0],rectanglepts.shape[1],1))*c
+    rmat = np.divide(distancesPts(rectanglepts,cmat),b)
+    kmat = np.ones((rectangle.shape[0],rectangle.shape[1])) - rmat**2
+    return kmat
 
 def initStateVectors(imageSize,sampleSize):
     xs = [random.uniform(0,imageSize[1]) for i in range(sampleSize)]
@@ -60,42 +103,119 @@ def distancesPts(mat1,mat2):
             distances[i][j] = np.sqrt(np.power((mat1[i][j][0]-mat2[i][j][0]),2)+np.power((mat1[i][j][1]-mat2[i][j][1]),2))
     return distances
 
+def draw_particles(svs_predict,frame):
+    for sv in svs_predict:
+        cv2.circle(frame,(int(sv[0]),int(sv[1])),3,cv.CV_RGB(100,0,255))
+    return frame
+
+def getDistance(distribution,distributionNew):
+    d = np.zeros((1,3))
+    for i in range(3):
+        ro = 0
+        for j in range(8):
+            ro = ro + np.sqrt(distribution[i][j]*distributionNew[i][j])
+        d[0][i] = np.sqrt(1-ro)
+    return d
+
+def calculWeight(d,sigma):
+    dprime = d.transpose()
+    sigmadet = np.linalg.det(sigma)
+    sigmainv = np.linalg.inv(sigma)
+    weight = np.exp((-1/2)*(np.dot((np.dot(d,sigmainv)),dprime))) / (np.sqrt(np.power(2*np.pi,3)*sigmadet))
+    return weight[0]
+
+def resampling(svs,weights,N):
+    sorted_particle = sorted([list(x) for x in zip(svs,weights)],key=lambda x:x[1],reverse=True)
+    resampled_particle = []
+    while(len(resampled_particle)<N):
+        for sp in sorted_particle:
+            resampled_particle += [sp[0]]*(np.array(sp[1])[0]*N*4)
+    resampled_particle = resampled_particle[0:N]
+
+    return(resampled_particle)
+
+def addBruit(systemModel,sampleSize,dim,svs_predict):
+    sigma = 10
+    rnorm = stats.norm.rvs(0,sigma,size=sampleSize*dim)
+    ranges = zip([sampleSize*i for i in range(dim)],[sampleSize*i for i in (range(dim+1)[1:])])
+    ws = np.array([rnorm[p:q] for p,q in ranges])
+    ws = ws.transpose()
+    svs_predictNew = [systemModel.generate(sv,w) for sv,w in zip(svs_predict,ws)]
+    return svs_predictNew
+
 def main():
 
-    window = [100, 200, 350, 450] # y1, x1, y2, x2
-    b = np.sqrt(np.power((window[2]-window[0]),2) + np.power((window[3]-window[1]),2))
+    window = [280, 110, 350, 230] # y1, x1, y2, x2
+    #window = [200, 250, 300, 350] # y1, x1, y2, x2
+    windowsize = [window[2]-window[0],window[3]-window[1]] #Hy, Hx
 
-    capture = cv2.VideoCapture('video/wei.avi')
-    sampleSize = 100;
+    b = np.sqrt(np.power((window[2]-window[0]),2) + np.power((window[3]-window[1]),2))
+    # sigmaweight = np.array([[1,1,1],[2,5,4],[3,4,5]])
+    sigmaweight = np.array([[1,0,0],[0,1,0],[0,0,1]])
+
+    fourcc = cv2.cv.CV_FOURCC(*'XVID')
+    out = cv2.VideoWriter('output.avi',fourcc, 20.0, (404,720))
+
+    capture = cv2.VideoCapture('video/IMG_0001.avi')
+    sampleSize = 50;
     imageSize = []
     imageSize.append(capture.get(cv2.cv.CV_CAP_PROP_FRAME_HEIGHT))
     imageSize.append(capture.get(cv2.cv.CV_CAP_PROP_FRAME_WIDTH))
     ret, image = capture.read()
     yuv = cv2.cvtColor(image,cv2.COLOR_BGR2YUV);
-    #rectangle = image[window[0]:window[2],window[1]:window[3]]
     rectangle = yuv[window[0]:window[2],window[1]:window[3]]
+    rectangletest = image[window[0]:window[2],window[1]:window[3]]
     svs = initStateVectors(imageSize,sampleSize)
 
-    dst = yuv.copy()
-    for sv in svs:
-        cv2.circle(dst,(int(sv[0]),int(sv[1])),3,cv.CV_RGB(100,0,255))
-
-    rectanglepts = getPixelPosition(rectangle,window)
-
-
-    c = [(window[2]+window[0])/2,(window[3]+window[1])/2] # y, x
-    cmat = np.ones((rectanglepts.shape[0],rectanglepts.shape[1],1))*c
-    rmat = np.divide(distancesPts(rectanglepts,cmat),b)
-    kmat = np.ones((rectangle.shape[0],rectangle.shape[1])) - rmat**2
-    #f = np.sum(1./kmat)  erreur sur l'article
+    #Calculate color distribution for the target rectangle
+    kmat = getKmat(rectangle,window,b)
     f = 1/(np.sum(kmat))
-    distribution = np.zeros((3,8))
-    for i in range(3):
-        for j in range(8):
-            distribution[i][j]=calculateDistribution(window,rectangle,kmat,f,i,j+1)
+    distribution = getDistributionMatrice(window,rectangle,kmat,f,b)
 
-    cv2.imshow('frame1',dst)
-    cv2.waitKey()
+    #Draw particle on frame and show frame
+    frameInit = draw_particles(svs,image)
+    cv2.imshow('frame0',frameInit)
+    #cv2.imshow('frame0',rectangle)
+
+    dim = len(svs[1])
+    # sigma = 2.0
+    while(capture.isOpened()):
+        ret, frame = capture.read()
+        systemModel = SystemModel(model_s)
+        # rnorm = stats.norm.rvs(0,sigma,size=sampleSize*dim)
+        # ranges = zip([sampleSize*i for i in range(dim)],[sampleSize*i for i in (range(dim+1)[1:])])
+        # ws = np.array([rnorm[p:q] for p,q in ranges])
+        # ws = ws.transpose()
+        # svs_predict = [systemModel.generate(sv,w) for sv,w in zip(svs,ws)]
+        svs_predict = svs #addBruit(systemModel,sampleSize,dim,svs)
+        weights = []
+        particlesValide = []
+        for particle in svs_predict:
+            windowNew = getWindow(particle,windowsize,frame)
+            if (windowNew != -1):
+                particlesValide.append(particle)
+                rectangleNew = getRectangle(frame,windowNew)
+                kmatNew = getKmat(rectangleNew,windowNew,b)
+                fNew = 1/(np.sum(kmatNew))
+                distributionNew = getDistributionMatrice(windowNew,rectangleNew,kmatNew,fNew,b)
+                d = getDistance(distribution,distributionNew)
+                weight = calculWeight(d,sigmaweight)
+                weights.append(weight)
+
+        weights = [float(i)/sum(weights) for i in weights]
+        svs_predict = resampling(particlesValide,weights,sampleSize)
+        svs_predict = addBruit(systemModel,sampleSize,dim,svs_predict)
+        frame = draw_particles(svs_predict,frame)
+
+        out.write(frame)
+        cv2.imshow('frame1',frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    capture.release()
+    out.release()
+    cv2.destroyAllWindows()
+
 
 if __name__ == '__main__':
     main()
