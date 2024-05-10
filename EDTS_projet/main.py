@@ -56,32 +56,25 @@ def getYuvWindow(frame,window):
 
     yuv = cv2.cvtColor(frame,cv2.COLOR_BGR2YUV);
     rectangle = yuv[window[0]:window[2],window[1]:window[3]]
+
     return rectangle
 
-def calculateColorDistribution(window,rectangle,yuv,n,kmat,f,b):
-    #rectanglepts = getPixelPosition(rectangle,window)
+def calculateColorDistribution(rectangle,yuvChannel,colorBin,kmat,f):
     pY = 0
-    # cy = (window[2]+window[0])/2
-    # cx = (window[3]+window[1])/2
-    # f = 0
 
     for i in range(rectangle.shape[0]):
         for j in range(rectangle.shape[1]):
-            tmp = rectangle[i][j][yuv]
-            # r = np.sqrt(np.power((i+window[0]-cy),2)+np.power((j+window[1]-cx),2))/b
-            # k = 1 - np.power(r,2)
-            # f = f + k
-            if (np.ceil(tmp/32)==n):
-                pY = pY + kmat[i][j] * (np.ceil(tmp/32) - n + 1)*f
-                # pY = pY + k*(np.ceil(tmp/32) - n + 1)
-    # pY = pY/f
+            tmp = rectangle[i][j][yuvChannel]
+            if (np.ceil(tmp/32)==colorBin):
+                pY = pY + kmat[i][j]*f
     return pY
 
-def getDistributionMatrice(window,rectangle,kmat,f,b):
-    distribution = np.zeros((3,8))
+def getDistributionMatrice(rectangle,kmat,f):
+    # 3 channels, 8 bins for color distribution
+    distribution = np.zeros((3,8)) 
     for i in range(3):
         for j in range(8):
-            distribution[i][j]=calculateColorDistribution(window,rectangle,i,j+1,kmat,f,b)
+            distribution[i][j]=calculateColorDistribution(rectangle,i,j+1,kmat,f)
     return distribution
 
 
@@ -105,9 +98,9 @@ def getKmat(rectangle,window,b):
     kmat = np.ones((rectangle.shape[0],rectangle.shape[1])) - rmat**2
     return kmat
 
-def initStateVectors(imageSize,sampleSize):
-    xs = [random.uniform(0,imageSize[1]) for i in range(sampleSize)]
-    ys = [random.uniform(0,imageSize[0]) for i in range(sampleSize)]
+def initStateVectors(window,sampleSize):
+    xs = [random.uniform(window[1],window[3]) for i in range(sampleSize)]
+    ys = [random.uniform(window[0],window[2]) for i in range(sampleSize)]
     vxs = [random.uniform(0,5) for i in range(sampleSize)]
     vys = [random.uniform(0,5) for i in range(sampleSize)]
     hx = [1 for i in range(sampleSize)]
@@ -129,12 +122,13 @@ def draw_particles(svs_predict,frame):
 
 def getDistance(distribution,distributionNew):
     """ Calculate Bhattacharyya distance between two distributions"""
+    # calculate distance for each channel
     d = np.zeros((1,3))
     for i in range(3):
-        ro = 0
-        for j in range(8):
-            ro = ro + np.sqrt(distribution[i][j]*distributionNew[i][j])
-        d[0][i] = np.sqrt(1-ro)
+        # when bcoef = 1 two distributions are identical
+        bcoef =sum(np.sqrt(distribution[i]*distributionNew[i]))
+        # the distance bhattacharyya defined in reference paper, to understand why there is a difference  
+        d[0][i] = np.sqrt(1-bcoef)
     return d
 
 def calculWeight(d,sigma):
@@ -146,12 +140,11 @@ def calculWeight(d,sigma):
 
 def resampling(svs,weights,N):
     sorted_particle = sorted([list(x) for x in zip(svs,weights)],key=lambda x:x[1],reverse=True)
-    print(f"N={N}")
-    print(f"sorted particles : nb#{len(sorted_particle)}")
+    logging.info(f"Nb sorted particles : {len(sorted_particle)}")
+    logging.info(f"first 10 particles' weight : {sorted(weights[:10],reverse=True)}")
     resampled_particle = []
     while(len(resampled_particle)<N):
         for sp in sorted_particle:
-            #resampled_particle.append(np.array(sp[0])*(np.array(sp[1])[0]*N*4))
             resampled_particle.append(sp[0])
     resampled_particle = resampled_particle[0:N]
 
@@ -166,20 +159,20 @@ def addBruit(systemModel,sampleSize,dim,svs_predict):
     svs_predictNew = [systemModel.generate(sv,w) for sv,w in zip(svs_predict,ws)]
     return svs_predictNew
 
-def initialisation(image,imageSize,window,sampleSize=100):
+def initialisation(image,window,sampleSize=30):
     # window diagonal distance
     b = np.sqrt(np.power((window[2]-window[0]),2) + np.power((window[3]-window[1]),2))
     # sigma filter
     sigma = np.array([[1,0,0],[0,1,0],[0,0,1]])
     # generate state vector for samples
-    svs = initStateVectors(imageSize,sampleSize)
+    svs = initStateVectors(window,sampleSize)
     # get yuv version for target window
     rectangle = getYuvWindow(image,window)
     # initialize weighting
     kmat = getKmat(rectangle,window,b)
     # normalisation factor
     f = 1/(np.sum(kmat))
-    distribution = getDistributionMatrice(window,rectangle,kmat,f,b)
+    distribution = getDistributionMatrice(rectangle,kmat,f)
 
     return (b,sigma,svs,distribution)
 
@@ -200,25 +193,23 @@ def main():
     # Initial the window that contains the object to be traced, for the input video, we track the face of a climber
     window = [90, 220, 180, 280] # y1, x1, y2, x2
     windowsize = [window[2]-window[0],window[3]-window[1]] #Hy, Hx
-    logging.info(f"Initialized object window size H#{windowsize[0]}, W#{windowsize[1]}")
+    logging.info(f"Initialized object window {window}, size H#{windowsize[0]}, W#{windowsize[1]}")
 
     # Initialize particle samples and their distribution
-    sampleSize=100
-    (b,sigmaweight,svs,distribution) = initialisation(image,imageSize,window,sampleSize)
+    sampleSize=30
+    (b,sigmaweight,svs,distribution) = initialisation(image,window,sampleSize)
 
-    # Draw particles on frame and show frame
-    frameInit = draw_particles(svs,image)
 
     # Uncomment to show the initialized object to be tracked
+    # # Draw particles on frame and show frame
+    # frameInit = draw_particles(svs,image)
     # cv2.imshow('frame0',frameInit)
     # cv2.imshow('frame1',frameInit[window[0]:window[2],window[1]:window[3]])
     # cv2.waitKey() 
 
     dim = len(svs[1])
-    while(capture.isOpened() and testcount>0):
+    while(capture.isOpened()):
         ret, frame = capture.read()
-        logging.info(f"capture read image succeed: {ret}")
-
         systemModel = SystemModel(model_s)
         svs_predict = svs 
         weights = []
@@ -230,7 +221,7 @@ def main():
                 rectangleNew = getYuvWindow(frame,windowNew)
                 kmatNew = getKmat(rectangleNew,windowNew,b)
                 fNew = 1/(np.sum(kmatNew))
-                distributionNew = getDistributionMatrice(windowNew,rectangleNew,kmatNew,fNew,b)
+                distributionNew = getDistributionMatrice(rectangleNew,kmatNew,fNew)
                 d = getDistance(distribution,distributionNew)
                 weight = calculWeight(d,sigmaweight)
                 weights.append(weight)
@@ -242,7 +233,6 @@ def main():
         out.write(frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-        testcount-=1
     capture.release()
     out.release()
     cv2.destroyAllWindows()
