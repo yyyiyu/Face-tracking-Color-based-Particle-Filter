@@ -9,7 +9,7 @@ import time
 import logging
 
 logging.basicConfig(
-    format='%(asctime)s %(levelname)-8s %(message)s',
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
     level=logging.INFO,
     datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -20,17 +20,24 @@ class SystemModel:
         return(self.model(sv,w))
 
 def model_s(sv,w):
-    F = np.matrix([[1,0,1,0,0,0,0],
+    """Propagate the sample, a state vector, through a dynamic model """
+
+    # First order model describing an object moving wiht constant velocity for x,y,hx,hy
+    A = np.matrix([[1,0,1,0,0,0,0],
                    [0,1,0,1,0,0,0],
                    [0,0,1,0,0,0,0],
                    [0,0,0,1,0,0,0],
                    [0,0,0,0,1,0,1],
                    [0,0,0,0,0,1,1],
                    [0,0,0,0,0,0,1]])
-    return(np.array(np.dot(F,sv))[0]+w)
+    
+    # s(t) = A*s(t-a)+w(t-1)
+    return(np.array(np.dot(A,sv))[0]+w)
 
 
 def getWindow(pt,windowsize,frame):
+    """Calculate new window with current locate x, y"""
+
     pt = np.asarray(pt)
     xmax = frame.shape[1]
     ymax = frame.shape[0]
@@ -44,13 +51,14 @@ def getWindow(pt,windowsize,frame):
         window = -1
     return window
 
-def getRectangle(frame,window):
-    print(window)
+def getYuvWindow(frame,window):
+    """Generate luminance rectangle for tracked object """
+
     yuv = cv2.cvtColor(frame,cv2.COLOR_BGR2YUV);
     rectangle = yuv[window[0]:window[2],window[1]:window[3]]
     return rectangle
 
-def calculateDistribution(window,rectangle,yuv,n,kmat,f,b):
+def calculateColorDistribution(window,rectangle,yuv,n,kmat,f,b):
     #rectanglepts = getPixelPosition(rectangle,window)
     pY = 0
     # cy = (window[2]+window[0])/2
@@ -73,7 +81,7 @@ def getDistributionMatrice(window,rectangle,kmat,f,b):
     distribution = np.zeros((3,8))
     for i in range(3):
         for j in range(8):
-            distribution[i][j]=calculateDistribution(window,rectangle,i,j+1,kmat,f,b)
+            distribution[i][j]=calculateColorDistribution(window,rectangle,i,j+1,kmat,f,b)
     return distribution
 
 
@@ -86,10 +94,14 @@ def getPixelPosition(rectangle,windows):
 
 
 def getKmat(rectangle,window,b):
+    """Calculation of the weighting for each particle"""
     rectanglepts = getPixelPosition(rectangle,window)
+    # center of rectangle
     c = [(window[2]+window[0])/2,(window[3]+window[1])/2] # y, x
+    # color distribution
     cmat = np.ones((rectanglepts.shape[0],rectanglepts.shape[1],1))*c
     rmat = np.divide(distancesPts(rectanglepts,cmat),b)
+    # weighting functino
     kmat = np.ones((rectangle.shape[0],rectangle.shape[1])) - rmat**2
     return kmat
 
@@ -116,6 +128,7 @@ def draw_particles(svs_predict,frame):
     return frame
 
 def getDistance(distribution,distributionNew):
+    """ Calculate Bhattacharyya distance between two distributions"""
     d = np.zeros((1,3))
     for i in range(3):
         ro = 0
@@ -133,10 +146,13 @@ def calculWeight(d,sigma):
 
 def resampling(svs,weights,N):
     sorted_particle = sorted([list(x) for x in zip(svs,weights)],key=lambda x:x[1],reverse=True)
+    print(f"N={N}")
+    print(f"sorted particles : nb#{len(sorted_particle)}")
     resampled_particle = []
     while(len(resampled_particle)<N):
         for sp in sorted_particle:
-            resampled_particle += [sp[0]]*(np.array(sp[1])[0]*N*4)
+            #resampled_particle.append(np.array(sp[0])*(np.array(sp[1])[0]*N*4))
+            resampled_particle.append(sp[0])
     resampled_particle = resampled_particle[0:N]
 
     return(resampled_particle)
@@ -150,67 +166,68 @@ def addBruit(systemModel,sampleSize,dim,svs_predict):
     svs_predictNew = [systemModel.generate(sv,w) for sv,w in zip(svs_predict,ws)]
     return svs_predictNew
 
-def main():
-
-    # Initial the window that contains the object to be traced, for the input video, we track the face of a climber
-    window = [80, 210, 160, 290] # y1, x1, y2, x2
-    windowsize = [window[2]-window[0],window[3]-window[1]] #Hy, Hx
-    logging.info(f"Initialized object window size H#{windowsize[0]}, W#{windowsize[1]}")
-
+def initialisation(image,imageSize,window,sampleSize=100):
+    # window diagonal distance
     b = np.sqrt(np.power((window[2]-window[0]),2) + np.power((window[3]-window[1]),2))
-    sigmaweight = np.array([[1,0,0],[0,1,0],[0,0,1]])
+    # sigma filter
+    sigma = np.array([[1,0,0],[0,1,0],[0,0,1]])
+    # generate state vector for samples
+    svs = initStateVectors(imageSize,sampleSize)
+    # get yuv version for target window
+    rectangle = getYuvWindow(image,window)
+    # initialize weighting
+    kmat = getKmat(rectangle,window,b)
+    # normalisation factor
+    f = 1/(np.sum(kmat))
+    distribution = getDistributionMatrice(window,rectangle,kmat,f,b)
 
+    return (b,sigma,svs,distribution)
+
+def main():
     # Define output video file
     fourcc = cv2.VideoWriter.fourcc(*'XVID')
     out = cv2.VideoWriter('output/yL1uOzsjXlo_000003_000013_ft.avi',fourcc, 20, (480,360))
 
     # Load input video
     capture = cv2.VideoCapture('video/yL1uOzsjXlo_000003_000013.avi')
-
-    # Initial numbre of particles used to prediction the next position of tracked object 
-    sampleSize = 30
-
     # Initial rectangle
     imageSize=[capture.get(cv2.CAP_PROP_FRAME_HEIGHT),capture.get(cv2.CAP_PROP_FRAME_WIDTH)]
     logging.info(f"Input video frame size H#{imageSize[0]}, W#{imageSize[1]}")
     ret, image = capture.read()
     logging.info(f"capture read image succeed: {ret}")
-)
-    svs = initStateVectors(imageSize,sampleSize)
-    #Draw particle on frame and show frame
+
+
+    # Initial the window that contains the object to be traced, for the input video, we track the face of a climber
+    window = [90, 220, 180, 280] # y1, x1, y2, x2
+    windowsize = [window[2]-window[0],window[3]-window[1]] #Hy, Hx
+    logging.info(f"Initialized object window size H#{windowsize[0]}, W#{windowsize[1]}")
+
+    # Initialize particle samples and their distribution
+    sampleSize=100
+    (b,sigmaweight,svs,distribution) = initialisation(image,imageSize,window,sampleSize)
+
+    # Draw particles on frame and show frame
     frameInit = draw_particles(svs,image)
-    cv2.imshow('frame0',frameInit)
-    time.sleep(5)
-    capture.release()
-    exit(0)
-    yuv = cv2.cvtColor(image,cv2.COLOR_BGR2YUV);
-    rectangle = yuv[window[0]:window[2],window[1]:window[3]]
-    #Calculate color distribution for the target rectangle
-    kmat = getKmat(rectangle,window,b)
-    f = 1/(np.sum(kmat))
-    distribution = getDistributionMatrice(window,rectangle,kmat,f,b)
+
+    # Uncomment to show the initialized object to be tracked
+    # cv2.imshow('frame0',frameInit)
+    # cv2.imshow('frame1',frameInit[window[0]:window[2],window[1]:window[3]])
+    # cv2.waitKey() 
 
     dim = len(svs[1])
-    # sigma = 2.0
-    testcount=10
     while(capture.isOpened() and testcount>0):
         ret, frame = capture.read()
         logging.info(f"capture read image succeed: {ret}")
 
         systemModel = SystemModel(model_s)
-        # rnorm = stats.norm.rvs(0,sigma,size=sampleSize*dim)
-        # ranges = zip([sampleSize*i for i in range(dim)],[sampleSize*i for i in (range(dim+1)[1:])])
-        # ws = np.array([rnorm[p:q] for p,q in ranges])
-        # ws = ws.transpose()
-        # svs_predict = [systemModel.generate(sv,w) for sv,w in zip(svs,ws)]
-        svs_predict = svs #addBruit(systemModel,sampleSize,dim,svs)
+        svs_predict = svs 
         weights = []
         particlesValide = []
         for particle in svs_predict:
             windowNew = getWindow(particle,windowsize,frame)
             if (windowNew != -1):
                 particlesValide.append(particle)
-                rectangleNew = getRectangle(frame,windowNew)
+                rectangleNew = getYuvWindow(frame,windowNew)
                 kmatNew = getKmat(rectangleNew,windowNew,b)
                 fNew = 1/(np.sum(kmatNew))
                 distributionNew = getDistributionMatrice(windowNew,rectangleNew,kmatNew,fNew,b)
@@ -222,9 +239,7 @@ def main():
         svs_predict = resampling(particlesValide,weights,sampleSize)
         svs_predict = addBruit(systemModel,sampleSize,dim,svs_predict)
         frame = draw_particles(svs_predict,frame)
-
         out.write(frame)
-        #cv2.imshow('frame1',frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
         testcount-=1
